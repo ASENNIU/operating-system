@@ -25,12 +25,16 @@
 #define VIRTIO0 0x10001000
 #define VIRTIO0_IRQ 1
 
-// local interrupt controller, which contains the timer.
+#ifdef LAB_NET
+#define E1000_IRQ 33
+#endif
+
+// core local interruptor (CLINT), which contains the timer.
 #define CLINT 0x2000000L
 #define CLINT_MTIMECMP(hartid) (CLINT + 0x4000 + 8*(hartid))
 #define CLINT_MTIME (CLINT + 0xBFF8) // cycles since boot.
 
-// qemu puts programmable interrupt controller here.
+// qemu puts platform-level interrupt controller (PLIC) here.
 #define PLIC 0x0c000000L
 #define PLIC_PRIORITY (PLIC + 0x0)
 #define PLIC_PENDING (PLIC + 0x1000)
@@ -53,7 +57,7 @@
 
 // map kernel stacks beneath the trampoline,
 // each surrounded by invalid guard pages.
-#define KSTACK(p) (TRAMPOLINE - ((p)+1)* 2*PGSIZE)
+#define KSTACK(p) (TRAMPOLINE - (p)*2*PGSIZE - 3*PGSIZE)
 
 // User memory layout.
 // Address zero first:
@@ -62,6 +66,14 @@
 //   fixed-size stack
 //   expandable heap
 //   ...
+//   USYSCALL (shared with kernel)
 //   TRAPFRAME (p->trapframe, used by the trampoline)
 //   TRAMPOLINE (the same page as in the kernel)
 #define TRAPFRAME (TRAMPOLINE - PGSIZE)
+#ifdef LAB_PGTBL
+#define USYSCALL (TRAPFRAME - PGSIZE)
+
+struct usyscall {
+  int pid;  // Process ID
+};
+#endif
