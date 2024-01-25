@@ -2,6 +2,12 @@
 
 CFS负责处理普通非实时进程, 这类进程是我们linux中最普遍的进程。CFS调度算法的思想：理想状态下每个进程都能获得相同的时间片，并且同时运行在CPU上，但实际上一个CPU同一时刻运行的进程只能有一个。 也就是说，当一个进程占用CPU时，其他进程就必须等待。CFS为了实现公平，必须惩罚当前正在运行的进程，以使那些正在等待的进程下次被调度。
 
+![](./assert/CFS运行示意图.png)
+
+​                                                                                 CFS运行示意图
+
+其中，struct rq是cpu运行队列，struct cfs_rq指cfs调度器的运行队列，sched_entity即调度实体，struct task_struct表示进程的具体信息。下文将主要关注struct cfs_rq和struct sched_entity的内容和关系。
+
 # 前景回顾
 
 **CFS调度器**
@@ -40,6 +46,128 @@ CFS调度算法的思想：理想状态下每个进程都能获得相同的时�
 
 
 
+
+在此之前将先说明调度队列的情况。
+
+就绪队列是全局调度器许多操作的起点, 但是进程并不是由就绪队列直接管理的, 调度管理是各个调度器的职责, 因此在各个就绪队列中嵌入了特定调度类的子就绪队列(cfs的顶级调度就队列 struct cfs_rq, 实时调度类的就绪队列struct rt_rq和deadline调度类的就绪队列struct dl_rq）
+
+```C
+/* CFS-related fields in a runqueue */
+/* CFS调度的运行队列，每个CPU的rq会包含一个cfs_rq，而每个组调度的sched_entity也会有自己的一个cfs_rq队列 */
+struct cfs_rq {
+    /* CFS运行队列中所有进程的总负载 */
+    struct load_weight load;
+    /*
+     *  nr_running: cfs_rq中调度实体数量
+     *  h_nr_running: 只对进程组有效，其下所有进程组中cfs_rq的nr_running之和
+    */
+    unsigned int nr_running, h_nr_running;
+
+    u64 exec_clock;
+
+    /*
+     * 当前CFS队列上最小运行时间，单调递增
+     * 两种情况下更新该值: 
+     * 1、更新当前运行任务的累计运行时间时
+     * 2、当任务从队列删除去，如任务睡眠或退出，这时候会查看剩下的任务的vruntime是否大于min_vruntime，如果是则更新该值。
+     */
+
+    u64 min_vruntime;
+#ifndef CONFIG_64BIT
+    u64 min_vruntime_copy;
+#endif
+    /* 该红黑树的root */
+    struct rb_root tasks_timeline;
+     /* 下一个调度结点(红黑树最左边结点，最左边结点就是下个调度实体) */
+    struct rb_node *rb_leftmost;
+
+    /*
+     * 'curr' points to currently running entity on this cfs_rq.
+     * It is set to NULL otherwise (i.e when none are currently running).
+     * curr: 当前正在运行的sched_entity（对于组虽然它不会在cpu上运行，但是当它的下层有一个task在cpu上运行，那么它所在的cfs_rq就把它当做是该cfs_rq上当前正在运行的sched_entity）
+     * next: 表示有些进程急需运行，即使不遵从CFS调度也必须运行它，调度时会检查是否next需要调度，有就调度next
+     *
+     * skip: 略过进程(不会选择skip指定的进程调度)
+     */
+    struct sched_entity *curr, *next, *last, *skip;
+
+#ifdef  CONFIG_SCHED_DEBUG
+    unsigned int nr_spread_over;
+#endif
+
+#ifdef CONFIG_SMP
+    /*
+     * CFS load tracking
+     */
+    struct sched_avg avg;
+    u64 runnable_load_sum;
+    unsigned long runnable_load_avg;
+#ifdef CONFIG_FAIR_GROUP_SCHED
+    unsigned long tg_load_avg_contrib;
+#endif
+    atomic_long_t removed_load_avg, removed_util_avg;
+#ifndef CONFIG_64BIT
+    u64 load_last_update_time_copy;
+#endif
+
+#ifdef CONFIG_FAIR_GROUP_SCHED
+    /*
+     *   h_load = weight * f(tg)
+     *
+     * Where f(tg) is the recursive weight fraction assigned to
+     * this group.
+     */
+    unsigned long h_load;
+    u64 last_h_load_update;
+    struct sched_entity *h_load_next;
+#endif /* CONFIG_FAIR_GROUP_SCHED */
+#endif /* CONFIG_SMP */
+
+#ifdef CONFIG_FAIR_GROUP_SCHED
+    /* 所属于的CPU rq */
+    struct rq *rq;  /* cpu runqueue to which this cfs_rq is attached */
+
+    /*
+     * leaf cfs_rqs are those that hold tasks (lowest schedulable entity in
+     * a hierarchy). Non-leaf lrqs hold other higher schedulable entities
+     * (like users, containers etc.)
+     *
+     * leaf_cfs_rq_list ties together list of leaf cfs_rq's in a cpu. This
+     * list is used during load balance.
+     */
+    int on_list;
+    struct list_head leaf_cfs_rq_list;
+    /* 拥有该CFS运行队列的进程组 */
+    struct task_group *tg;  /* group that "owns" this runqueue */
+
+#ifdef CONFIG_CFS_BANDWIDTH
+    int runtime_enabled;
+    u64 runtime_expires;
+    s64 runtime_remaining;
+
+    u64 throttled_clock, throttled_clock_task;
+    u64 throttled_clock_task_time;
+    int throttled, throttle_count;
+    struct list_head throttled_list;
+#endif /* CONFIG_CFS_BANDWIDTH */
+#endif /* CONFIG_FAIR_GROUP_SCHED */
+};
+```
+
+|      成员      |                             描述                             |
+| :------------: | :----------------------------------------------------------: |
+|   nr_running   |                    队列上可运行进程的数目                    |
+|      load      |              就绪队列上可运行进程的累计负荷权重              |
+|  min_vruntime  | 跟踪记录队列上所有进程的最小虚拟运行时间. 这个值是实现与就绪队列相关的虚拟时钟的基础 |
+| tasks_timeline |            用于在按时间排序的红黑树中管理所有进程            |
+|  rb_leftmost   | 总是设置为指向红黑树最左边的节点, 即需要被调度的进程. 该值其实可以可以通过病例红黑树获得, 但是将这个值存储下来可以减少搜索红黑树花费的平均时间 |
+|      curr      | 当前正在运行的sched_entity（对于组虽然它不会在cpu上运行，但是当它的下层有一个task在cpu上运行，那么它所在的cfs_rq就把它当做是该cfs_rq上当前正在运行的sched_entity |
+|      next      | 表示有些进程急需运行，即使不遵从CFS调度也必须运行它，调度时会检查是否next需要调度，有就调度next |
+|      skip      |             略过进程(不会选择skip指定的进程调度)             |
+
+
+
+
 # 时间记账
 
 所有调度器都必须对进程运行时间做记账。
@@ -74,6 +202,10 @@ vruntime是本进程生命周期中在CPU上运行的虚拟时钟。那么何时
 ## 虚拟时间
 
 vruntime变量存放进程的虚拟运行时间，该运行时间（花在运行上的时间和）的计算是经过了所有可运行进程总数的标准化（或者说被加权）。虚拟时间是以ns为单位的，所以vruntime和定时器节拍不再相关。虚拟运行时间可以帮助我们逼近CFS模型所追求的“理想任务处理器”。CFS使用vruntime变量来记录一个程序到底运行了多长时间以及它还应该再运行多久。
+
+![](./assert/CFS虚拟时间计算.png)
+
+​                                                                                CFS虚拟时间计算规则
 
 定义再kernel/sched_fair.c文件中的update_curr()函数实现了该记账功能。update_curr的流程如下
 
@@ -200,6 +332,8 @@ enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
         __enqueue_entity(cfs_rq, se);
 }
 ```
+
+**CFS阻塞任务唤醒**。当一个任务在一段时间内由于阻塞或睡眠而没有运行时，其vruntime是不会增加的。当它再一次进人可运行状态时很有可能会在很长一段时间内占据CPU核心。调度器会在—个任务被重新插人运行队列时将该任务的虚拟时间se->vruntime设置为：运行队列中最小虚拟时间min_vruntime与se＿＞vruntime的较小值。既保证阻塞后的任务会在第—时间被调度，又避免该任务长时间占用CPU。  
 
 这里我们并不关心具体的如何在红黑树中插入节点。
 
