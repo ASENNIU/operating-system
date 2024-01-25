@@ -25,6 +25,7 @@
 - scheduling
   - Linux进程调度概述
   - Linux进程调度-CFS调度器
+  - CPU架构-SMP和NUMA
 
 # MIT 6.s081 Lab
 
